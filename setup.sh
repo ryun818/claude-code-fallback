@@ -113,8 +113,19 @@ else
   echo "  To start manually: cd $PROXY_DIR && .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 3456"
 fi
 
-# 8. Shell config
-echo "[8/8] Configuring shell..."
+# 8. Slash command
+echo "[8/9] Installing /fallback slash command..."
+COMMANDS_DIR="$HOME/.claude/commands"
+mkdir -p "$COMMANDS_DIR"
+if [ ! -f "$COMMANDS_DIR/fallback.md" ]; then
+  cp "$SCRIPT_DIR/templates/commands/fallback.md" "$COMMANDS_DIR/fallback.md"
+  echo "  /fallback command installed"
+else
+  echo "  /fallback command already exists, skipping"
+fi
+
+# 9. Shell config
+echo "[9/9] Configuring shell..."
 if [ -f "$SHELL_RC" ]; then
   if ! grep -q 'ANTHROPIC_BASE_URL.*127.0.0.1:3456' "$SHELL_RC"; then
     echo '' >> "$SHELL_RC"

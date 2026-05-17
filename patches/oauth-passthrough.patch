@@ -1,0 +1,253 @@
+diff --git a/app/config.py b/app/config.py
+index 9ea2c9e..b40db5c 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -90,6 +90,7 @@ class AppConfig(BaseModel):
+ 
+     server: ServerConfig = Field(default_factory=ServerConfig)
+     models: dict[str, str] = Field(default_factory=dict)
++    fallback_models: dict[str, str] = Field(default_factory=dict)
+     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+ 
+ 
+@@ -213,9 +214,38 @@ def reload_config() -> AppConfig:
+     return load_config(_config_path)
+ 
+ 
++_STICKY_PATH = str(Path(__file__).parent.parent / "sticky-config.json")
++
++
++def _read_sticky_mode() -> str:
++    """Read the current fallback mode from sticky-config.json.
++
++    Returns:
++        str - 'claude' (default) or 'deepseek'.
++    """
++    try:
++        with open(_STICKY_PATH, "r", encoding="utf-8") as f:
++            data = json.load(f)
++        return data.get("mode", "claude")
++    except Exception:
++        return "claude"
++
++
++_ANTHROPIC_PASSTHROUGH_PROVIDER = ProviderConfig(
++    provider_type="claude",
++    api_key="",
++    base_url="https://api.anthropic.com/v1",
++    headers={},
++    models={},
++)
++
++
+ def resolve_route(anthropic_model: str) -> ResolvedRoute:
+     """Resolve an Anthropic model name to a provider route.
+ 
++    If the model is not in the config mapping, it is treated as an Anthropic
++    passthrough (forwarded to api.anthropic.com with original OAuth headers).
++
+     Args:
+         anthropic_model: str - The model name from the incoming Anthropic request.
+ 
+@@ -223,13 +253,21 @@ def resolve_route(anthropic_model: str) -> ResolvedRoute:
+         ResolvedRoute - Resolved routing information.
+ 
+     Raises:
+-        ValueError: If the model or provider is not found in config.
++        ValueError: If a mapped provider or model is not found in config.
+     """
+     cfg = load_config()
++    sticky_mode = _read_sticky_mode()
+ 
+     mapping = cfg.models.get(anthropic_model)
++    if mapping is None and sticky_mode != "claude":
++        mapping = cfg.fallback_models.get(sticky_mode)
+     if mapping is None:
+-        raise ValueError(f"Model '{anthropic_model}' not found in config models mapping")
++        return ResolvedRoute(
++            provider_name="anthropic",
++            provider=_ANTHROPIC_PASSTHROUGH_PROVIDER,
++            model_id=anthropic_model,
++            model_config=ModelConfig(name=anthropic_model),
++        )
+ 
+     parts = mapping.split("/", 1)
+     if len(parts) != 2:
+diff --git a/app/main.py b/app/main.py
+index 7c8d53c..3a7ddad 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,8 +1,10 @@
+ import json
+ import logging
++import subprocess
+ import traceback
+ import uuid
+ from contextlib import asynccontextmanager
++from pathlib import Path
+ from typing import Any
+ 
+ from fastapi import FastAPI, Request
+@@ -113,6 +115,49 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
+ 
+ app.add_middleware(LocalOnlyMiddleware)
+ 
++STICKY_PATH = Path(__file__).parent.parent / "sticky-config.json"
++NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
++
++
++def _notify_fallback_available():
++    """Send macOS notification when Anthropic returns 429/5xx, offering DeepSeek switch."""
++    try:
++        sticky = json.loads(STICKY_PATH.read_text())
++        if sticky.get("mode") != "claude":
++            return
++    except Exception:
++        pass
++
++    try:
++        cfg = load_config()
++        providers = list(cfg.fallback_models.keys())
++        actions = ",".join(providers) + ",様子見" if providers else "様子見"
++
++        result = subprocess.run(
++            [
++                NOTIFIER,
++                "-title", "🔄 Claude 制限検知",
++                "-subtitle", "429/5xx エラーが発生しました",
++                "-message", "フォールバック先を選択してください",
++                "-actions", actions,
++                "-closeLabel", "様子見",
++                "-timeout", "300",
++                "-sound", "Pop",
++                "-group", "claude-proxy-fallback",
++            ],
++            capture_output=True, text=True, timeout=310,
++        )
++        chosen = result.stdout.strip()
++        if chosen in providers:
++            STICKY_PATH.write_text(json.dumps({"mode": chosen}))
++            logger.info("User chose to switch to %s", chosen)
++            subprocess.run(
++                [NOTIFIER, "-title", f"🔄 {chosen} 切替完了", "-message", f"次のリクエストから {chosen} を使用します", "-sound", "Tink", "-group", "claude-proxy-fallback"],
++                timeout=10,
++            )
++    except Exception as e:
++        logger.error("Notification error: %s", e)
++
+ 
+ @app.head("/")
+ async def root_head():
+@@ -236,7 +281,8 @@ async def create_message(request: Request) -> Any:
+         )
+ 
+     if route.provider_type == "claude":
+-        return await _handle_claude_passthrough(body, route, anthropic_model, is_stream)
++        orig_headers = {k.lower(): v for k, v in request.headers.items()}
++        return await _handle_claude_passthrough(body, route, anthropic_model, is_stream, orig_headers)
+ 
+     if use_react:
+         return await _handle_react(anthropic_request, route, anthropic_model, is_stream)
+@@ -254,6 +300,7 @@ async def _handle_claude_passthrough(
+     route: Any,
+     anthropic_model: str,
+     is_stream: bool,
++    original_headers: dict[str, str] | None = None,
+ ) -> Any:
+     """Handle requests for Anthropic passthrough providers.
+ 
+@@ -277,10 +324,14 @@ async def _handle_claude_passthrough(
+                 bytes - Raw SSE event bytes from the provider.
+             """
+             try:
+-                async for chunk in anthropic_provider.send_streaming(raw_body, route):
++                async for chunk in anthropic_provider.send_streaming(raw_body, route, original_headers):
+                     yield chunk
+             except Exception as e:
+                 logger.error("Claude passthrough streaming error: %s\n%s", e, traceback.format_exc())
++                status = getattr(getattr(e, "response", None), "status_code", 0)
++                if status == 429 or status >= 500:
++                    import threading
++                    threading.Thread(target=_notify_fallback_available, daemon=True).start()
+                 error_event = json.dumps({
+                     "type": "error",
+                     "error": {"type": "api_error", "message": f"Provider error: {e}"},
+@@ -298,9 +349,13 @@ async def _handle_claude_passthrough(
+         )
+ 
+     try:
+-        raw_response = await anthropic_provider.send_non_streaming(raw_body, route)
++        raw_response = await anthropic_provider.send_non_streaming(raw_body, route, original_headers)
+     except Exception as e:
+         logger.error("Claude passthrough error: %s\n%s", e, traceback.format_exc())
++        status = getattr(getattr(e, "response", None), "status_code", 0)
++        if status == 429 or status >= 500:
++            import threading
++            threading.Thread(target=_notify_fallback_available, daemon=True).start()
+         return JSONResponse(
+             status_code=502,
+             content={
+diff --git a/app/providers/anthropic_provider.py b/app/providers/anthropic_provider.py
+index 68dcff6..6178e44 100644
+--- a/app/providers/anthropic_provider.py
++++ b/app/providers/anthropic_provider.py
+@@ -32,11 +32,12 @@ async def close_client() -> None:
+     _client = None
+ 
+ 
+-def _build_headers(route: ResolvedRoute) -> dict[str, str]:
++def _build_headers(route: ResolvedRoute, original_headers: dict[str, str] | None = None) -> dict[str, str]:
+     """Build headers for Anthropic passthrough request.
+ 
+     Args:
+         route: ResolvedRoute - Resolved routing information.
++        original_headers: dict[str, str] | None - Original request headers to pass through.
+ 
+     Returns:
+         dict[str, str] - Request headers.
+@@ -44,6 +45,11 @@ def _build_headers(route: ResolvedRoute) -> dict[str, str]:
+     headers: dict[str, str] = {
+         "Content-Type": "application/json",
+     }
++    if original_headers:
++        for key in ("x-api-key", "authorization", "anthropic-version", "anthropic-beta"):
++            val = original_headers.get(key)
++            if val:
++                headers[key] = val
+     headers.update(route.provider.headers)
+     return headers
+ 
+@@ -68,6 +74,7 @@ def _build_body(raw_body: dict[str, Any], route: ResolvedRoute) -> dict[str, Any
+ async def send_non_streaming(
+     raw_body: dict[str, Any],
+     route: ResolvedRoute,
++    original_headers: dict[str, str] | None = None,
+ ) -> dict[str, Any]:
+     """Send a non-streaming passthrough request to an Anthropic-compatible provider.
+ 
+@@ -83,7 +90,7 @@ async def send_non_streaming(
+     """
+     body = _build_body(raw_body, route)
+     url = route.endpoint_url
+-    headers = _build_headers(route)
++    headers = _build_headers(route, original_headers)
+     client = await get_client()
+ 
+     debug_logger.info(">>> ANTHROPIC PASSTHROUGH (non-streaming) to %s", url)
+@@ -99,6 +106,7 @@ async def send_non_streaming(
+ async def send_streaming(
+     raw_body: dict[str, Any],
+     route: ResolvedRoute,
++    original_headers: dict[str, str] | None = None,
+ ) -> AsyncIterator[bytes]:
+     """Send a streaming passthrough request to an Anthropic-compatible provider.
+ 
+@@ -115,7 +123,7 @@ async def send_streaming(
+     body = _build_body(raw_body, route)
+     body["stream"] = True
+     url = route.endpoint_url
+-    headers = _build_headers(route)
++    headers = _build_headers(route, original_headers)
+     client = await get_client()
+ 
+     debug_logger.info(">>> ANTHROPIC PASSTHROUGH (streaming) to %s", url)

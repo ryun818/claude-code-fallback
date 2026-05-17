@@ -1,0 +1,7 @@
+config.json
+sticky-config.json
+.venv/
+__pycache__/
+*.pyc
+debug.log
+.DS_Store

@@ -60,29 +60,34 @@ Then edit `~/.claude-code-proxy/config.json` with your API keys and run `source 
 
 ## Adding Providers
 
-Edit `~/.claude-code-proxy/config.json`:
+Edit `~/.claude-code-proxy/config.json`. Any OpenAI-compatible API works.
 
-1. Add the provider to `providers`
-2. Add a mapping to `fallback_models`
+**Example: Adding Qwen**
 
 ```json
 {
   "fallback_models": {
-    "deepseek": "deepseek/deepseek-chat",
-    "my-provider": "myprovider/model-name"
+    "qwen": "qwen/qwen3-max"
   },
   "providers": {
-    "myprovider": {
+    "qwen": {
       "provider_type": "openai",
-      "api_key": "YOUR_KEY",
-      "base_url": "https://api.example.com/v1",
+      "api_key": "sk-your-dashscope-key",
+      "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
       "models": {
-        "model-name": { "name": "Model Name" }
+        "qwen3-max": { "name": "Qwen3 Max", "max_output_tokens": 65536 }
       }
     }
   }
 }
 ```
+
+Then: `/fallback qwen`
+
+**Generic pattern** — 3 steps:
+1. Add to `fallback_models`: `"name": "provider/model"`
+2. Add to `providers` with `provider_type: "openai"`
+3. Switch with `/fallback name`
 
 Config changes are hot-reloaded (no restart needed).
 

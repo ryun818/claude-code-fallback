@@ -251,3 +251,31 @@ index 68dcff6..6178e44 100644
      client = await get_client()
  
      debug_logger.info(">>> ANTHROPIC PASSTHROUGH (streaming) to %s", url)
+diff --git a/app/providers/gemini_provider.py b/app/providers/gemini_provider.py
+index 91cfa42..f0892ff 100644
+--- a/app/providers/gemini_provider.py
++++ b/app/providers/gemini_provider.py
+@@ -46,9 +46,10 @@ def _build_endpoint_url(route: ResolvedRoute, stream: bool) -> str:
+     """
+     base = route.provider.base_url.rstrip("/")
+     model = route.model_id
++    key = route.provider.api_key
+     if stream:
+-        return f"{base}/models/{model}:streamGenerateContent?alt=sse"
+-    return f"{base}/models/{model}:generateContent"
++        return f"{base}/models/{model}:streamGenerateContent?alt=sse&key={key}"
++    return f"{base}/models/{model}:generateContent?key={key}"
+ 
+ 
+ def _build_headers(route: ResolvedRoute) -> dict[str, str]:
+@@ -62,9 +63,9 @@ def _build_headers(route: ResolvedRoute) -> dict[str, str]:
+     """
+     headers: dict[str, str] = {
+         "Content-Type": "application/json",
+-        "Authorization": f"Bearer {route.provider.api_key}",
+     }
+     headers.update(route.provider.headers)
++    headers.pop("Authorization", None)
+     return headers
+ 
+ 

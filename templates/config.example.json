@@ -24,12 +24,10 @@
       }
     },
     "gemini": {
-      "provider_type": "gemini",
+      "provider_type": "openai",
       "api_key": "YOUR_GEMINI_API_KEY",
-      "base_url": "https://generativelanguage.googleapis.com/v1beta",
-      "headers": {
-        "x-goog-api-key": "YOUR_GEMINI_API_KEY"
-      },
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "headers": {},
       "models": {
         "gemini-2.5-flash": {
           "name": "Gemini 2.5 Flash"

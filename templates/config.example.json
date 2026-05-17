@@ -6,8 +6,8 @@
   },
   "fallback_models": {
     "deepseek": "deepseek/deepseek-chat",
-    "gemini": "gemini/gemini-2.5-flash",
-    "chatgpt": "openai/gpt-4.1"
+    "gemini": "gemini/gemini-2.5-pro",
+    "chatgpt": "openai/o3"
   },
   "models": {},
   "providers": {
@@ -46,6 +46,10 @@
         "gpt-4.1": {
           "name": "GPT-4.1",
           "max_output_tokens": 32768
+        },
+        "o3": {
+          "name": "o3",
+          "max_output_tokens": 100000
         }
       }
     }

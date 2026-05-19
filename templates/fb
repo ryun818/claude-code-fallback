@@ -1,0 +1,9 @@
+#!/bin/bash
+MODE="${1:-}"
+STICKY="$HOME/.claude-code-proxy/sticky-config.json"
+if [ -z "$MODE" ]; then
+  cat "$STICKY"
+else
+  echo "{\"mode\": \"$MODE\"}" > "$STICKY"
+  echo "Switched to $MODE"
+fi

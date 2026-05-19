@@ -42,18 +42,21 @@ Then edit `~/.claude-code-proxy/config.json` with your API keys and run `source 
 
 **Normal**: Just use `claude` as usual. No extra cost.
 
-**Slash command (in session)**:
-```
-/fallback deepseek   # Switch to DeepSeek
-/fallback gemini     # Switch to Gemini
-/fallback chatgpt    # Switch to ChatGPT
-/fallback claude     # Switch back to Claude
-```
-
-**When Claude is limited/down**:
-- Proxy **automatically retries with fallback provider** (429/5xx)
+**When Claude is limited/down** (429/5xx):
+- Proxy **automatically retries with fallback provider**
 - macOS notification: "Switched to DeepSeek"
 - Your session continues seamlessly — no action needed
+
+**Manual switching** — works even during outages:
+```
+! fb gemini     # Switch to Gemini
+! fb chatgpt    # Switch to ChatGPT
+! fb deepseek   # Switch to DeepSeek
+! fb claude     # Switch back
+! fb            # Show current mode
+```
+
+Or use `/fallback <provider>` during normal operation (slash command, needs API).
 
 **When Claude recovers**:
 - Automatic health check every hour

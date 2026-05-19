@@ -77,6 +77,13 @@ cp "$SCRIPT_DIR/templates/sticky-config.json" "$PROXY_DIR/sticky-config.json" 2>
 cp "$SCRIPT_DIR/templates/recovery-check.sh" "$PROXY_DIR/recovery-check.sh" 2>/dev/null || true
 chmod +x "$PROXY_DIR/recovery-check.sh"
 
+# fb command (fallback shortcut)
+LOCAL_BIN="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN"
+cp "$SCRIPT_DIR/templates/fb" "$LOCAL_BIN/fb"
+chmod +x "$LOCAL_BIN/fb"
+echo "  fb command installed to $LOCAL_BIN/fb"
+
 # 6. launchd plist (macOS only)
 if [ "$(uname)" = "Darwin" ]; then
   echo "[6/8] Installing launchd services..."

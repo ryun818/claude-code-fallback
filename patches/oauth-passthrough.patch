@@ -74,7 +74,7 @@ index 9ea2c9e..b40db5c 100644
      parts = mapping.split("/", 1)
      if len(parts) != 2:
 diff --git a/app/main.py b/app/main.py
-index 7c8d53c..3a7ddad 100644
+index 7c8d53c..82f8021 100644
 --- a/app/main.py
 +++ b/app/main.py
 @@ -1,8 +1,10 @@
@@ -88,67 +88,109 @@ index 7c8d53c..3a7ddad 100644
  from typing import Any
  
  from fastapi import FastAPI, Request
-@@ -113,6 +115,49 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
+@@ -113,6 +115,47 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
  
  app.add_middleware(LocalOnlyMiddleware)
  
 +STICKY_PATH = Path(__file__).parent.parent / "sticky-config.json"
 +NOTIFIER = "/opt/homebrew/bin/terminal-notifier"
++FALLBACK_STATUS_CODES = {429, 500, 502, 503, 529}
 +
 +
-+def _notify_fallback_available():
-+    """Send macOS notification when Anthropic returns 429/5xx, offering DeepSeek switch."""
++def _notify_switched(provider: str):
++    """Send macOS notification that fallback was activated (post-hoc)."""
 +    try:
-+        sticky = json.loads(STICKY_PATH.read_text())
-+        if sticky.get("mode") != "claude":
-+            return
++        subprocess.Popen(
++            [NOTIFIER, "-title", f"🔄 {provider} に自動切替", "-message", "Claude がエラーを返したためフォールバックしました", "-sound", "Pop", "-group", "claude-proxy-fallback"],
++        )
 +    except Exception:
 +        pass
 +
-+    try:
-+        cfg = load_config()
-+        providers = list(cfg.fallback_models.keys())
-+        actions = ",".join(providers) + ",様子見" if providers else "様子見"
 +
-+        result = subprocess.run(
-+            [
-+                NOTIFIER,
-+                "-title", "🔄 Claude 制限検知",
-+                "-subtitle", "429/5xx エラーが発生しました",
-+                "-message", "フォールバック先を選択してください",
-+                "-actions", actions,
-+                "-closeLabel", "様子見",
-+                "-timeout", "300",
-+                "-sound", "Pop",
-+                "-group", "claude-proxy-fallback",
-+            ],
-+            capture_output=True, text=True, timeout=310,
++def _notify_restored():
++    """Send macOS notification that Claude is back."""
++    try:
++        subprocess.Popen(
++            [NOTIFIER, "-title", "🎯 Claude 復帰", "-message", "通常モードに戻りました", "-sound", "Tink", "-group", "claude-proxy-fallback"],
 +        )
-+        chosen = result.stdout.strip()
-+        if chosen in providers:
-+            STICKY_PATH.write_text(json.dumps({"mode": chosen}))
-+            logger.info("User chose to switch to %s", chosen)
-+            subprocess.run(
-+                [NOTIFIER, "-title", f"🔄 {chosen} 切替完了", "-message", f"次のリクエストから {chosen} を使用します", "-sound", "Tink", "-group", "claude-proxy-fallback"],
-+                timeout=10,
-+            )
-+    except Exception as e:
-+        logger.error("Notification error: %s", e)
++    except Exception:
++        pass
++
++
++def _get_default_fallback() -> str | None:
++    """Get the first configured fallback provider name."""
++    cfg = load_config()
++    keys = list(cfg.fallback_models.keys())
++    return keys[0] if keys else None
++
++
++def _switch_to_fallback() -> str | None:
++    """Switch sticky to the default fallback provider. Returns provider name or None."""
++    provider = _get_default_fallback()
++    if not provider:
++        return None
++    STICKY_PATH.write_text(json.dumps({"mode": provider}))
++    logger.info("Auto-switched to fallback: %s", provider)
++    return provider
 +
  
  @app.head("/")
  async def root_head():
-@@ -236,7 +281,8 @@ async def create_message(request: Request) -> Any:
+@@ -236,11 +279,51 @@ async def create_message(request: Request) -> Any:
          )
  
      if route.provider_type == "claude":
 -        return await _handle_claude_passthrough(body, route, anthropic_model, is_stream)
 +        orig_headers = {k.lower(): v for k, v in request.headers.items()}
-+        return await _handle_claude_passthrough(body, route, anthropic_model, is_stream, orig_headers)
++        try:
++            return await _handle_claude_passthrough(body, route, anthropic_model, is_stream, orig_headers)
++        except Exception as e:
++            status = getattr(getattr(e, "response", None), "status_code", 0)
++            if status in FALLBACK_STATUS_CODES:
++                provider_name = _switch_to_fallback()
++                if provider_name:
++                    logger.info("Anthropic returned %d, falling back to %s", status, provider_name)
++                    import threading
++                    threading.Thread(target=_notify_switched, args=(provider_name,), daemon=True).start()
++                    fallback_route = resolve_route(anthropic_model)
++                    return await _dispatch_request(body, fallback_route, anthropic_model, is_stream, request)
++            raise
++
++    return await _dispatch_request(body, route, anthropic_model, is_stream, request)
++
++
++async def _dispatch_request(body: dict, route: Any, anthropic_model: str, is_stream: bool, request: Request) -> Any:
++    """Dispatch a request to a non-Claude provider (OpenAI/Gemini) with format conversion."""
++    replacements = route.model_config.system_replacements
++    if replacements:
++        system = body.get("system")
++        if isinstance(system, str):
++            for target, replacement in replacements.items():
++                system = system.replace(target, replacement)
++            body["system"] = system
++        elif isinstance(system, list):
++            for idx, block in enumerate(system):
++                if isinstance(block, dict) and block.get("type") == "text":
++                    txt = block.get("text", "")
++                    for target, replacement in replacements.items():
++                        txt = txt.replace(target, replacement)
++                    system[idx] = {**block, "text": txt}
++            body["system"] = system
  
++    use_react = route.model_config.use_react
      if use_react:
-         return await _handle_react(anthropic_request, route, anthropic_model, is_stream)
-@@ -254,6 +300,7 @@ async def _handle_claude_passthrough(
+-        return await _handle_react(anthropic_request, route, anthropic_model, is_stream)
++        body = react_transform_request(body)
+ 
++    from app.models import AnthropicRequest
++    anthropic_request = AnthropicRequest(**body)
++
++    if use_react:
++        return await _handle_react(anthropic_request, route, anthropic_model, is_stream)
+     if is_stream:
+         return await _handle_streaming(anthropic_request, route, anthropic_model)
+     elif route.force_stream:
+@@ -254,6 +337,7 @@ async def _handle_claude_passthrough(
      route: Any,
      anthropic_model: str,
      is_stream: bool,
@@ -156,37 +198,50 @@ index 7c8d53c..3a7ddad 100644
  ) -> Any:
      """Handle requests for Anthropic passthrough providers.
  
-@@ -277,10 +324,14 @@ async def _handle_claude_passthrough(
-                 bytes - Raw SSE event bytes from the provider.
-             """
-             try:
+@@ -271,21 +355,8 @@ async def _handle_claude_passthrough(
+     """
+     if is_stream:
+         async def passthrough_generator():
+-            """Yield SSE events from the upstream Anthropic provider.
+-
+-            Yields:
+-                bytes - Raw SSE event bytes from the provider.
+-            """
+-            try:
 -                async for chunk in anthropic_provider.send_streaming(raw_body, route):
-+                async for chunk in anthropic_provider.send_streaming(raw_body, route, original_headers):
-                     yield chunk
-             except Exception as e:
-                 logger.error("Claude passthrough streaming error: %s\n%s", e, traceback.format_exc())
-+                status = getattr(getattr(e, "response", None), "status_code", 0)
-+                if status == 429 or status >= 500:
-+                    import threading
-+                    threading.Thread(target=_notify_fallback_available, daemon=True).start()
-                 error_event = json.dumps({
-                     "type": "error",
-                     "error": {"type": "api_error", "message": f"Provider error: {e}"},
-@@ -298,9 +349,13 @@ async def _handle_claude_passthrough(
+-                    yield chunk
+-            except Exception as e:
+-                logger.error("Claude passthrough streaming error: %s\n%s", e, traceback.format_exc())
+-                error_event = json.dumps({
+-                    "type": "error",
+-                    "error": {"type": "api_error", "message": f"Provider error: {e}"},
+-                })
+-                yield f"event: error\ndata: {error_event}\n\n".encode("utf-8")
++            async for chunk in anthropic_provider.send_streaming(raw_body, route, original_headers):
++                yield chunk
+ 
+         return StreamingResponse(
+             passthrough_generator(),
+@@ -297,18 +368,7 @@ async def _handle_claude_passthrough(
+             },
          )
  
-     try:
+-    try:
 -        raw_response = await anthropic_provider.send_non_streaming(raw_body, route)
-+        raw_response = await anthropic_provider.send_non_streaming(raw_body, route, original_headers)
-     except Exception as e:
-         logger.error("Claude passthrough error: %s\n%s", e, traceback.format_exc())
-+        status = getattr(getattr(e, "response", None), "status_code", 0)
-+        if status == 429 or status >= 500:
-+            import threading
-+            threading.Thread(target=_notify_fallback_available, daemon=True).start()
-         return JSONResponse(
-             status_code=502,
-             content={
+-    except Exception as e:
+-        logger.error("Claude passthrough error: %s\n%s", e, traceback.format_exc())
+-        return JSONResponse(
+-            status_code=502,
+-            content={
+-                "type": "error",
+-                "error": {"type": "api_error", "message": f"Provider error: {e}"},
+-            },
+-        )
+-
++    raw_response = await anthropic_provider.send_non_streaming(raw_body, route, original_headers)
+     return JSONResponse(content=raw_response)
+ 
+ 
 diff --git a/app/providers/anthropic_provider.py b/app/providers/anthropic_provider.py
 index 68dcff6..6178e44 100644
 --- a/app/providers/anthropic_provider.py
@@ -279,3 +334,63 @@ index 91cfa42..f0892ff 100644
      return headers
  
  
+diff --git a/recovery-check.sh b/recovery-check.sh
+new file mode 100755
+index 0000000..b09bcad
+--- /dev/null
++++ b/recovery-check.sh
+@@ -0,0 +1,47 @@
++#!/bin/bash
++
++STICKY="/Users/ryun/.claude-code-proxy/sticky-config.json"
++NOTIFIER="/opt/homebrew/bin/terminal-notifier"
++CLAUDE="/Users/ryun/.local/bin/claude"
++
++# Claude モードなら何もしない
++MODE=$(/opt/homebrew/bin/jq -r '.mode // "claude"' "$STICKY" 2>/dev/null)
++[ "$MODE" = "claude" ] && exit 0
++
++# Pro Max アカウント経由で Claude に疎通テスト
++RESPONSE=$("$CLAUDE" -p "." --model haiku 2>&1)
++EXIT_CODE=$?
++
++echo "$(date): Health check exit_code=${EXIT_CODE}"
++
++if [ "$EXIT_CODE" -ne 0 ]; then
++  echo "$(date): API not yet recovered (exit ${EXIT_CODE})"
++  exit 0
++fi
++
++# 復旧確認 — アクションボタン通知
++RESULT=$("$NOTIFIER" \
++  -title "✅ Claude API復旧" \
++  -subtitle "現在は DeepSeek で動作中" \
++  -message "Claudeに戻しますか？" \
++  -actions "戻す,あと1時間" \
++  -closeLabel "あと1時間" \
++  -timeout 600 \
++  -sound Glass \
++  -group "claude-proxy-recovery")
++
++echo "$(date): User selected: ${RESULT}"
++
++if [ "$RESULT" = "戻す" ]; then
++  echo '{"mode": "claude"}' > "$STICKY"
++
++  "$NOTIFIER" \
++    -title "🎯 Claude復帰完了" \
++    -message "通常モードに戻りました" \
++    -sound Tink \
++    -group "claude-proxy-recovery"
++
++  echo "$(date): Switched back to Claude"
++fi
++
++exit 0
+diff --git a/sticky-config.json b/sticky-config.json
+new file mode 100644
+index 0000000..90fdb2a
+--- /dev/null
++++ b/sticky-config.json
+@@ -0,0 +1 @@
++{"mode": "claude"}

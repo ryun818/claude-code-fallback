@@ -10,7 +10,8 @@ Claude Code のフォールバックプロキシ。Claude API の障害・制限
 - **セッション維持** - 切替時にセッションが切れない。会話履歴・メモリ・タスクすべて引き継ぎ
 - **`/fallback` コマンド** - セッション内から `/fallback deepseek` で即切替
 - **複数プロバイダ** - DeepSeek, Gemini, ChatGPT に対応。config で追加可能
-- **macOS 通知** - 429/5xx 検知時にボタン付き通知。ワンクリックで切替
+- **自動フォールバック** - 429/5xx でプロキシが自動切替。Claude Code にエラーが見えない
+- **macOS 通知** - 切替・復旧時に通知
 - **自動復旧チェック** - 1時間ごとに Claude の復旧を確認、通知で戻す
 - **launchd 常駐** - PC再起動後も自動起動
 
@@ -50,8 +51,9 @@ Then edit `~/.claude-code-proxy/config.json` with your API keys and run `source 
 ```
 
 **When Claude is limited/down**:
-- macOS notification appears with provider buttons
-- Click to switch — your session continues seamlessly
+- Proxy **automatically retries with fallback provider** (429/5xx)
+- macOS notification: "Switched to DeepSeek"
+- Your session continues seamlessly — no action needed
 
 **When Claude recovers**:
 - Automatic health check every hour
